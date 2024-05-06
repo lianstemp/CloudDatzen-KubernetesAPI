@@ -1,8 +1,58 @@
 from fastapi import FastAPI
 from kubernetes import client, config
 from kubernetes.client import V1PersistentVolumeClaim, V1PersistentVolumeClaimSpec, V1ResourceRequirements, V1StatefulSet, V1StatefulSetSpec, V1PodTemplateSpec, V1ObjectMeta, V1Container, V1ContainerPort, V1EnvVar, V1VolumeMount, V1Service, V1ServiceSpec, V1ServicePort
+from enum import Enum
+from typing import Dict, List
 
 app = FastAPI()
+
+class DatabaseType(str, Enum):
+    mongodb = "mongodb"
+    mysql = "mysql"
+    postgresql = "postgresql"
+    redis = "redis"
+
+# Database configurations
+database_configs: Dict[str, Dict] = {
+    "mongodb": {
+        "image": "mongo:latest",
+        "env": [
+            V1EnvVar(name="MONGO_INITDB_ROOT_USERNAME", value="root"),
+            V1EnvVar(name="MONGO_INITDB_ROOT_PASSWORD", value="password"),
+            V1EnvVar(name="MONGO_INITDB_DATABASE", value="datzen")
+        ],
+        "ports": [V1ContainerPort(container_port=27017)],
+        "volume_mount_path": "/data/db"
+    },
+    "mysql": {
+        "image": "mysql:latest",
+        "env": [
+            V1EnvVar(name="MYSQL_ROOT_PASSWORD", value="password"),
+            V1EnvVar(name="MYSQL_DATABASE", value="datzen")
+        ],
+        "ports": [V1ContainerPort(container_port=3306)],
+        "volume_mount_path": "/var/lib/mysql"
+    },
+    "postgresql": {
+        "image": "postgres:latest",
+        "env": [
+            V1EnvVar(name="POSTGRES_USER", value="postgres"),
+            V1EnvVar(name="POSTGRES_PASSWORD", value="password"),
+            V1EnvVar(name="POSTGRES_DB", value="datzen")
+        ],
+        "ports": [V1ContainerPort(container_port=5432)],
+        "volume_mount_path": "/var/lib/postgresql/data"
+    },
+    "redis": {
+        "image": "redis:latest",
+        "env": [
+            V1EnvVar(name="REDIS_USERNAME", value="user"),
+            V1EnvVar(name="REDIS_PASSWORD", value="password")
+        ],
+        "ports": [V1ContainerPort(container_port=6379)],
+        "volume_mount_path": "/data"
+    }
+}
 
 try:
     config.load_incluster_config()
@@ -12,10 +62,15 @@ except config.config_exception.ConfigException:
     except config.config_exception.ConfigException:
         raise Exception("Could not configure kubernetes python client")
 
-@app.post("/deploy_stateful")
-async def deploy_stateful(db_name: str):
+@app.post("/deploydb/{db_type}")
+async def deploydb(db_name: str, db_type: DatabaseType):
     api_instance = client.AppsV1Api()
     core_api_instance = client.CoreV1Api()
+
+    if db_type not in database_configs:
+        raise ValueError(f"Unsupported database type: {db_type}")
+
+    db_config = database_configs[db_type]
 
     # Define the volume claim template
     volume_claim_template = V1PersistentVolumeClaim(
@@ -31,12 +86,10 @@ async def deploy_stateful(db_name: str):
     # Define the container
     container = client.V1Container(
         name=db_name,
-        image="mysql:5.7",
-        env=[
-            V1EnvVar(name="MYSQL_ROOT_PASSWORD", value="password")
-        ],
-        ports=[client.V1ContainerPort(container_port=3306)],
-        volume_mounts=[V1VolumeMount(name=f"{db_name}-pvc", mount_path="/var/lib/mysql")]
+        image=db_config["image"],
+        env=db_config["env"],
+        ports=db_config["ports"],
+        volume_mounts=[V1VolumeMount(name=f"{db_name}-pvc", mount_path=db_config["volume_mount_path"])]
     )
 
     # Define the pod spec
@@ -80,7 +133,7 @@ async def deploy_stateful(db_name: str):
         spec=V1ServiceSpec(
             type="NodePort",
             selector={"app": db_name},
-            ports=[V1ServicePort(port=3306, target_port=3306)]
+            ports=[V1ServicePort(port=db_config["ports"][0].container_port, target_port=db_config["ports"][0].container_port)]
         )
     )
 
@@ -90,4 +143,4 @@ async def deploy_stateful(db_name: str):
         namespace="default"
     )
 
-    return {"message": f"StatefulSet {db_name} and its service created"}
+    return {"message": f"StatefulSet {db_name} and its service for {db_type} created"}
