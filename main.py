@@ -3,6 +3,7 @@ from kubernetes import client, config
 from kubernetes.client import V1PersistentVolumeClaim, V1PersistentVolumeClaimSpec, V1ResourceRequirements, V1StatefulSet, V1StatefulSetSpec, V1PodTemplateSpec, V1ObjectMeta, V1Container, V1ContainerPort, V1EnvVar, V1VolumeMount, V1Service, V1ServiceSpec, V1ServicePort
 from enum import Enum
 from typing import Dict, List
+import secrets
 
 app = FastAPI()
 
@@ -16,43 +17,36 @@ class DatabaseType(str, Enum):
 database_configs: Dict[str, Dict] = {
     "mongodb": {
         "image": "mongo:latest",
-        "env": [
-            V1EnvVar(name="MONGO_INITDB_ROOT_USERNAME", value="root"),
-            V1EnvVar(name="MONGO_INITDB_ROOT_PASSWORD", value="password"),
-            V1EnvVar(name="MONGO_INITDB_DATABASE", value="datzen")
-        ],
+        "username": "root",
+        "database": "datzen",
         "ports": [V1ContainerPort(container_port=27017)],
         "volume_mount_path": "/data/db"
     },
     "mysql": {
         "image": "mysql:latest",
-        "env": [
-            V1EnvVar(name="MYSQL_ROOT_PASSWORD", value="password"),
-            V1EnvVar(name="MYSQL_DATABASE", value="datzen")
-        ],
+        "username": "root",
+        "database": "datzen",
         "ports": [V1ContainerPort(container_port=3306)],
         "volume_mount_path": "/var/lib/mysql"
     },
     "postgresql": {
         "image": "postgres:latest",
-        "env": [
-            V1EnvVar(name="POSTGRES_USER", value="postgres"),
-            V1EnvVar(name="POSTGRES_PASSWORD", value="password"),
-            V1EnvVar(name="POSTGRES_DB", value="datzen")
-        ],
+        "username": "postgres",
+        "database": "datzen",
         "ports": [V1ContainerPort(container_port=5432)],
         "volume_mount_path": "/var/lib/postgresql/data"
     },
     "redis": {
         "image": "redis:latest",
-        "env": [
-            V1EnvVar(name="REDIS_USERNAME", value="user"),
-            V1EnvVar(name="REDIS_PASSWORD", value="password")
-        ],
+        "username": "user",
+        "database": "",
         "ports": [V1ContainerPort(container_port=6379)],
         "volume_mount_path": "/data"
     }
 }
+
+def generate_password(length: int = 20):
+    return secrets.token_hex(length)
 
 try:
     config.load_incluster_config()
@@ -71,6 +65,7 @@ async def deploydb(db_name: str, db_type: DatabaseType):
         raise ValueError(f"Unsupported database type: {db_type}")
 
     db_config = database_configs[db_type]
+    password = generate_password()
 
     # Define the volume claim template
     volume_claim_template = V1PersistentVolumeClaim(
@@ -87,7 +82,11 @@ async def deploydb(db_name: str, db_type: DatabaseType):
     container = client.V1Container(
         name=db_name,
         image=db_config["image"],
-        env=db_config["env"],
+        env=[
+            V1EnvVar(name=f"{db_type.upper()}_USERNAME", value=db_config["username"]),
+            V1EnvVar(name=f"{db_type.upper()}_PASSWORD", value=password),
+            V1EnvVar(name=f"{db_type.upper()}_DATABASE", value=db_config["database"])
+        ],
         ports=db_config["ports"],
         volume_mounts=[V1VolumeMount(name=f"{db_name}-pvc", mount_path=db_config["volume_mount_path"])]
     )
@@ -138,9 +137,18 @@ async def deploydb(db_name: str, db_type: DatabaseType):
     )
 
     # Create the Service
-    core_api_instance.create_namespaced_service(
+    created_service = core_api_instance.create_namespaced_service(
         body=service,
         namespace="default"
     )
 
-    return {"message": f"StatefulSet {db_name} and its service for {db_type} created"}
+    node_port = created_service.spec.ports[0].node_port
+
+    return {
+        "message": f"StatefulSet {db_name} and its service for {db_type} created",
+        "database_type": db_type,
+        "username": db_config["username"],
+        "password": password,
+        "default_database": db_config["database"],
+        "node_port": node_port
+    }
